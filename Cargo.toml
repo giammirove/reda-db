@@ -1,0 +1,18 @@
+[package]
+name = "reda-db"
+version = "0.1.0"
+edition = "2021"
+authors = ["Gianmaria Rovelli <rovelli.gianmaria@gmail.com>"]
+license = "MIT"
+
+[lib]
+[dependencies]
+env_logger = "0.11.8"
+eyre = "0.6.12"
+image = "0.25.9"
+imageproc = "0.26.0"
+log = "0.4.29"
+num-traits = "0.2.19"
+rayon = "1.11.0"
+reda-lefdef = { git = "https://github.com/giammirove/reda-lefdef.git", branch = "main" }
+
