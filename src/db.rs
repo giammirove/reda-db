@@ -402,13 +402,13 @@ impl<'a, T: Numeric> ParsedInstance<'a, T> {
 
 #[derive(Debug)]
 pub struct DieArea<T: Numeric> {
-    site_name: String,
+    site_name: Option<String>,
     size: Size<T>,
     // offset of the site
     pub offset: Coords<T>,
 }
 impl<T: Numeric> DieArea<T> {
-    fn new(site_name: String, size: Size<T>, offset: Coords<T>) -> Self {
+    fn new(site_name: Option<String>, size: Size<T>, offset: Coords<T>) -> Self {
         Self {
             site_name,
             size,
@@ -573,14 +573,7 @@ fn read_instances<'a, T: Numeric>(
         Some(c) => c,
         None => return Ok((parsed_instances, VecInstances::default(), 0)),
     };
-
     for comp in comps {
-        let pl = match comp.opts.placement.as_ref() {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let point = &pl.1;
         let name = comp.name.as_str();
         let model = comp.model.as_str();
 
@@ -588,31 +581,42 @@ fn read_instances<'a, T: Numeric>(
             .get(model)
             .unwrap_or_else(|| panic!("INSTANCE MODEL NOT FOUND IN LEF {model}"));
 
-        let (offset_x, offset_y) = if comp_lib.is_in_site(&diearea.site_name) {
-            (diearea.offset.x, diearea.offset.y)
-        } else {
-            (T::zero(), T::zero())
+        let coords = match comp.opts.placement.as_ref() {
+            Some(p) => {
+                let (offset_x, offset_y) = if comp_lib.is_in_site(diearea.site_name.clone()) {
+                    (diearea.offset.x, diearea.offset.y)
+                } else {
+                    (T::zero(), T::zero())
+                };
+
+                let coords = Coords::new(
+                    ((T::from(p.1.x).unwrap() - offset_x) / units) * scale,
+                    ((T::from(p.1.y).unwrap() - offset_y) / units) * scale,
+                );
+
+                assert!(
+                    coords.x >= zero,
+                    "negative x {:?} (originally {:?} - center {:?}) with offset {:?} for {}",
+                    coords.x,
+                    p.1.x,
+                    center.0,
+                    offset_x,
+                    name
+                );
+                assert!(
+                    coords.y >= zero,
+                    "negative y {:?} (originally {:?} - center {:?}) with offset {:?} for {}",
+                    coords.y,
+                    p.1.y,
+                    center.0,
+                    offset_y,
+                    name
+                );
+
+                coords
+            }
+            None => Coords::new(T::zero(), T::zero()),
         };
-
-        let coords = Coords::new(
-            ((T::from(point.x).unwrap() - offset_x) / units) * scale,
-            ((T::from(point.y).unwrap() - offset_y) / units) * scale,
-        );
-
-        assert!(
-            coords.x >= zero,
-            "negative x {:?} with offset {:?} for {}",
-            coords.x,
-            offset_x,
-            name
-        );
-        assert!(
-            coords.y >= zero,
-            "negative y {:?} with offset {:?} for {}",
-            coords.y,
-            offset_y,
-            name
-        );
 
         let placement_type = if comp.is_fixed() {
             PlacementType::FIXED
@@ -747,49 +751,34 @@ fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
     let scale = T::from(SCALE).unwrap();
 
     // site
-    let sites = lef.sites.as_ref().ok_or_eyre("NO SITES FOUND in LEF")?;
-
-    let site = sites
-        .iter()
-        .find(|s| s.is_core())
-        .or_else(|| sites.first())
-        .ok_or_eyre("NO CORE SITE FOUND IN LEF")?;
+    let site = lef
+        .sites
+        .as_ref()
+        .and_then(|sites| sites.iter().find(|s| s.is_core()).or_else(|| sites.first()));
 
     // offsets
-    let (site_offset_x, site_offset_y) = def
-        .rows
-        .as_ref()
-        .and_then(|rows| {
+    let (site_offset_x, site_offset_y) = match site {
+        None => (0.0, 0.0),
+        Some(site) => def.rows.as_ref().map_or((0.0, 0.0), |rows| {
             let filtered: Vec<_> = rows.iter().filter(|r| r.site == site.name).collect();
+
             if filtered.is_empty() {
-                None
+                (0.0, 0.0)
             } else {
                 let min_x = filtered
                     .iter()
                     .map(|r| r.x as f32)
                     .fold(f32::INFINITY, f32::min);
+
                 let min_y = filtered
                     .iter()
                     .map(|r| r.y as f32)
                     .fold(f32::INFINITY, f32::min);
-                Some((min_x, min_y))
-            }
-        })
-        .or_else(|| {
-            def.sites.as_ref().map(|sites| {
-                let filtered: Vec<_> = sites.iter().filter(|s| s.name == site.name).collect();
-                let min_x = filtered
-                    .iter()
-                    .map(|s| s.size.width)
-                    .fold(f32::INFINITY, f32::min);
-                let min_y = filtered
-                    .iter()
-                    .map(|s| s.size.height)
-                    .fold(f32::INFINITY, f32::min);
+
                 (min_x, min_y)
-            })
-        })
-        .unwrap_or((0.0, 0.0));
+            }
+        }),
+    };
 
     // diearea
     let diearea = def
@@ -805,9 +794,10 @@ fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
 
     let die_offset_x = site_offset_x + offset_x;
     let die_offset_y = site_offset_y + offset_y;
+    let site_name = site.map(|s| s.name.clone());
 
     Ok(DieArea::new(
-        site.name.clone(),
+        site_name,
         Size::new(
             (T::from(diearea_width - site_offset_x * 2.).unwrap() / units_t) * scale,
             (T::from(diearea_height - site_offset_y * 2.).unwrap() / units_t) * scale,
@@ -870,15 +860,17 @@ fn read_netlist<'a, T: Numeric>(
                             .get(pin_name)
                             .unwrap_or_else(|| panic!("IO PIN NOT FOUND IN DEF {}", pin_name));
 
-                        let pl_location = if let Some(ref pl) = lib.opts.placement {
-                            &pl.location
+                        let (px, py) = if let Some(ref pl) = lib.opts.placement {
+                            (pl.location.x, pl.location.y)
                         } else {
-                            panic!("PLACEMENT NOT FOUND IN PIN {}", pin_name);
+                            // panic!("PLACEMENT NOT FOUND IN PIN {}", pin_name);
+                            // CLK in some cases might be be placed
+                            (0, 0)
                         };
 
                         let coords = Coords::new(
-                            (T::from(pl_location.x).unwrap() / units) * scale,
-                            (T::from(pl_location.y).unwrap() / units) * scale,
+                            (T::from(px).unwrap() / units) * scale,
+                            (T::from(py).unwrap() / units) * scale,
                         );
                         let size = Size::new(zero, zero);
 
