@@ -596,19 +596,17 @@ fn read_instances<'a, T: Numeric>(
 
                 assert!(
                     coords.x >= zero,
-                    "negative x {:?} (originally {:?} - center {:?}) with offset {:?} for {}",
+                    "negative x {:?} (originally {:?}) with offset {:?} for {}",
                     coords.x,
                     p.1.x,
-                    center.0,
                     offset_x,
                     name
                 );
                 assert!(
                     coords.y >= zero,
-                    "negative y {:?} (originally {:?} - center {:?}) with offset {:?} for {}",
+                    "negative y {:?} (originally {:?}) with offset {:?} for {}",
                     coords.y,
                     p.1.y,
-                    center.0,
                     offset_y,
                     name
                 );
