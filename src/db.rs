@@ -404,14 +404,21 @@ impl<'a, T: Numeric> ParsedInstance<'a, T> {
 pub struct DieArea<T: Numeric> {
     site_name: Option<String>,
     size: Size<T>,
+    full_size: Size<T>,
     // offset of the site
     pub offset: Coords<T>,
 }
 impl<T: Numeric> DieArea<T> {
-    fn new(site_name: Option<String>, size: Size<T>, offset: Coords<T>) -> Self {
+    fn new(
+        site_name: Option<String>,
+        size: Size<T>,
+        full_size: Size<T>,
+        offset: Coords<T>,
+    ) -> Self {
         Self {
             site_name,
             size,
+            full_size,
             offset,
         }
     }
@@ -421,8 +428,17 @@ impl<T: Numeric> DieArea<T> {
     pub fn height(&self) -> T {
         self.size.height
     }
+    pub fn full_width(&self) -> T {
+        self.full_size.width
+    }
+    pub fn full_height(&self) -> T {
+        self.full_size.height
+    }
     pub fn area(&self) -> T {
         self.size.width * self.size.height
+    }
+    pub fn use_full_size(&mut self) {
+        self.size = Size::new(self.full_size.width, self.full_size.height);
     }
 }
 
@@ -799,6 +815,10 @@ fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
         Size::new(
             (T::from(diearea_width - site_offset_x * 2.).unwrap() / units_t) * scale,
             (T::from(diearea_height - site_offset_y * 2.).unwrap() / units_t) * scale,
+        ),
+        Size::new(
+            (T::from(diearea_width).unwrap() / units_t) * scale,
+            (T::from(diearea_height).unwrap() / units_t) * scale,
         ),
         Coords::new(
             T::from(die_offset_x).unwrap(),
