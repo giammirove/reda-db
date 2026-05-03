@@ -1,491 +1,57 @@
-use eyre::{eyre, OptionExt, Result};
-use num_traits::{Float, FromPrimitive, Signed, ToPrimitive, Zero};
-use reda_lefdef::{read_def, read_lef, DEF, LEF};
+use eyre::{OptionExt, Result};
+use reda_lefdef::{read_def, read_lef, DEFPin, DEF, LEF};
 use std::fmt;
-use std::{collections::HashMap, ffi::OsString, ops::AddAssign, ops::SubAssign};
+use std::{collections::HashMap, ffi::OsString};
 
-const SCALE: f32 = 1.;
-
-pub trait Numeric:
-    Float
-    + Zero
-    + Sized
-    + Send
-    + Sync
-    + std::iter::Sum
-    + AddAssign
-    + SubAssign
-    + FromPrimitive
-    + ToPrimitive
-    + Signed
-    + std::fmt::Debug
-    + std::fmt::LowerExp
-    + std::default::Default
-    + 'static
-{
-}
-impl<T> Numeric for T where
-    T: Float
-        + Zero
-        + Sized
-        + Send
-        + Sync
-        + std::iter::Sum
-        + AddAssign
-        + SubAssign
-        + FromPrimitive
-        + ToPrimitive
-        + Signed
-        + std::fmt::Debug
-        + std::fmt::LowerExp
-        + std::default::Default
-        + 'static
-{
-}
-
-#[derive(Debug)]
-pub struct ParsedPin<T: Numeric> {
-    /// ID of Pin
-    pub pin_id: usize,
-    /// ID of the Macro of this Pin
-    pub macro_id: usize,
-    /// Offset from Macro
-    pub offset: Coords<T>,
-    /// Size of the Pin
-    pub size: Size<T>,
-}
-impl<T: Numeric> ParsedPin<T> {
-    fn new(pin_id: usize, macro_id: usize, offset: Coords<T>, size: Size<T>) -> Self {
-        Self {
-            pin_id,
-            macro_id,
-            offset,
-            size,
-        }
-    }
-}
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct Net {
-    pub pin_ids: Vec<usize>,
-}
-impl Net {
-    fn new(pin_ids: Vec<usize>) -> Self {
-        Self { pin_ids }
-    }
-}
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct VecCoordsIter<'a, T> {
-    x: std::slice::Iter<'a, T>,
-    y: std::slice::Iter<'a, T>,
-}
-impl<'a, T> Iterator for VecCoordsIter<'a, T> {
-    type Item = (&'a T, &'a T);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.x.next(), self.y.next()) {
-            (Some(x), Some(y)) => Some((x, y)),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.x.size_hint()
-    }
-}
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct VecCoordsIterMut<'a, T> {
-    x: std::slice::IterMut<'a, T>,
-    y: std::slice::IterMut<'a, T>,
-}
-impl<'a, T> Iterator for VecCoordsIterMut<'a, T> {
-    type Item = (&'a mut T, &'a mut T);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.x.next(), self.y.next()) {
-            (Some(x), Some(y)) => Some((x, y)),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.x.size_hint()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-#[repr(C)]
-pub struct VecCoords<T: Numeric> {
-    pub x: Vec<T>,
-    pub y: Vec<T>,
-}
-impl<T: Numeric> VecCoords<T> {
-    pub fn new(x: Vec<T>, y: Vec<T>) -> Self {
-        Self { x, y }
-    }
-    pub fn new_zero(num: usize) -> Self {
-        let zero = T::zero();
-        Self {
-            x: vec![zero; num],
-            y: vec![zero; num],
-        }
-    }
-    pub fn len(&self) -> usize {
-        assert!(self.x.len() == self.y.len());
-        self.x.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn iter(&self) -> VecCoordsIter<'_, T> {
-        assert_eq!(self.x.len(), self.y.len());
-        VecCoordsIter {
-            x: self.x.iter(),
-            y: self.y.iter(),
-        }
-    }
-    pub fn iter_mut(&mut self) -> VecCoordsIterMut<'_, T> {
-        assert_eq!(self.x.len(), self.y.len());
-        VecCoordsIterMut {
-            x: self.x.iter_mut(),
-            y: self.y.iter_mut(),
-        }
-    }
-}
-impl<'a, T: Numeric> IntoIterator for &'a VecCoords<T> {
-    type Item = (&'a T, &'a T);
-    type IntoIter = VecCoordsIter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-impl<'a, T: Numeric> IntoIterator for &'a mut VecCoords<T> {
-    type Item = (&'a mut T, &'a mut T);
-    type IntoIter = VecCoordsIterMut<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut()
-    }
-}
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct VecSizesIter<'a, T> {
-    w: std::slice::Iter<'a, T>,
-    h: std::slice::Iter<'a, T>,
-}
-impl<'a, T> Iterator for VecSizesIter<'a, T> {
-    type Item = (&'a T, &'a T);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.w.next(), self.h.next()) {
-            (Some(w), Some(h)) => Some((w, h)),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.w.size_hint()
-    }
-}
-#[derive(Debug)]
-#[repr(C)]
-pub struct VecSizesIterMut<'a, T> {
-    w: std::slice::IterMut<'a, T>,
-    h: std::slice::IterMut<'a, T>,
-}
-impl<'a, T> Iterator for VecSizesIterMut<'a, T> {
-    type Item = (&'a mut T, &'a mut T);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.w.next(), self.h.next()) {
-            (Some(w), Some(h)) => Some((w, h)),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.w.size_hint()
-    }
-}
-
-#[derive(Debug, Default)]
-#[repr(C)]
-pub struct VecSizes<T> {
-    pub w: Vec<T>,
-    pub h: Vec<T>,
-}
-impl<T> VecSizes<T> {
-    pub fn new(w: Vec<T>, h: Vec<T>) -> Self {
-        Self { w, h }
-    }
-    pub fn len(&self) -> usize {
-        assert!(self.w.len() == self.h.len());
-        self.w.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn iter(&self) -> VecSizesIter<'_, T> {
-        assert_eq!(self.w.len(), self.h.len());
-        VecSizesIter {
-            w: self.w.iter(),
-            h: self.h.iter(),
-        }
-    }
-    pub fn iter_mut(&mut self) -> VecSizesIterMut<'_, T> {
-        assert_eq!(self.w.len(), self.h.len());
-        VecSizesIterMut {
-            w: self.w.iter_mut(),
-            h: self.h.iter_mut(),
-        }
-    }
-}
-impl<'a, T> IntoIterator for &'a VecSizes<T> {
-    type Item = (&'a T, &'a T);
-    type IntoIter = VecSizesIter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-impl<'a, T> IntoIterator for &'a mut VecSizes<T> {
-    type Item = (&'a mut T, &'a mut T);
-    type IntoIter = VecSizesIterMut<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut()
-    }
-}
-
-#[derive(Debug)]
-pub struct Netlist<T: Numeric> {
-    pub parsed_pins: Vec<ParsedPin<T>>,
-    pub pins: VecCoords<T>,
-
-    pub pin_2_macro: Vec<usize>,
-    pub macro_2_pins: Vec<Vec<usize>>,
-
-    pub nets: Vec<Net>,
-    /// Number of Nets with 2 pins
-    pub n_2nets: usize,
-    /// Number of Nets with 3 pins
-    pub n_3nets: usize,
-    /// Number of Nets with > 3 pins
-    pub n_nnets: usize,
-}
-impl<T: Numeric> Netlist<T> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        parsed_pins: Vec<ParsedPin<T>>,
-        pins: VecCoords<T>,
-        pin_2_macro: Vec<usize>,
-        macro_2_pins: Vec<Vec<usize>>,
-        nets: Vec<Net>,
-        n_2nets: usize,
-        n_3nets: usize,
-        n_nnets: usize,
-    ) -> Self {
-        Self {
-            parsed_pins,
-            pins,
-            pin_2_macro,
-            macro_2_pins,
-            nets,
-            n_2nets,
-            n_3nets,
-            n_nnets,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default)]
-#[repr(C)]
-pub struct Coords<T> {
-    pub x: T,
-    pub y: T,
-}
-impl<T> Coords<T> {
-    fn new(x: T, y: T) -> Self {
-        Self { x, y }
-    }
-}
-
-#[derive(Debug, Clone)]
-#[repr(C)]
-pub struct Size<T> {
-    pub width: T,
-    pub height: T,
-}
-impl<T> Size<T> {
-    fn new(width: T, height: T) -> Self {
-        Self { width, height }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-#[allow(clippy::upper_case_acronyms)]
-enum InstanceType {
-    MACRO,
-    STDCELL,
-}
-
-#[derive(Debug, PartialEq)]
-#[allow(clippy::upper_case_acronyms)]
-enum PlacementType {
-    FIXED,
-    MOVABLE,
-}
-
-#[derive(Debug)]
-pub(crate) struct ParsedInstance<'a, T: Numeric> {
-    /// ID of the Instance
-    id: usize,
-    name: &'a str,
-    model: &'a str,
-
-    /// Instance Type
-    _instance_type: InstanceType,
-    /// Placement Type
-    _placement_type: PlacementType,
-
-    /// Initial coordinates
-    _coords: Coords<T>,
-    /// Offset from initial coordinates
-    _offset: Coords<T>,
-
-    /// Size of the instance (as define in the LEF)
-    _size: Size<T>,
-}
-impl<'a, T: Numeric> ParsedInstance<'a, T> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        id: usize,
-        name: &'a str,
-        model: &'a str,
-        _instance_type: InstanceType,
-        _placement_type: PlacementType,
-        _coords: Coords<T>,
-        _offset: Coords<T>,
-        _size: Size<T>,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            model,
-            _instance_type,
-            _placement_type,
-            _coords,
-            _offset,
-            _size,
-        }
-    }
-
-    pub(crate) fn update_id(&mut self, id: usize) {
-        self.id = id;
-    }
-}
-
-#[derive(Debug)]
-pub struct DieArea<T: Numeric> {
-    site_name: Option<String>,
-    size: Size<T>,
-    full_size: Size<T>,
-    // offset of the site
-    pub offset: Coords<T>,
-}
-impl<T: Numeric> DieArea<T> {
-    fn new(
-        site_name: Option<String>,
-        size: Size<T>,
-        full_size: Size<T>,
-        offset: Coords<T>,
-    ) -> Self {
-        Self {
-            site_name,
-            size,
-            full_size,
-            offset,
-        }
-    }
-    pub fn width(&self) -> T {
-        self.size.width
-    }
-    pub fn height(&self) -> T {
-        self.size.height
-    }
-    pub fn full_width(&self) -> T {
-        self.full_size.width
-    }
-    pub fn full_height(&self) -> T {
-        self.full_size.height
-    }
-    pub fn area(&self) -> T {
-        self.size.width * self.size.height
-    }
-    pub fn use_full_size(&mut self) {
-        self.size = Size::new(self.full_size.width, self.full_size.height);
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct VecInstances<T: Numeric> {
-    pub coords: VecCoords<T>,
-    pub sizes: VecSizes<T>,
-    pub areas: Vec<T>,    // redundant info but useful for computation
-    pub num_pins: Vec<T>, // use T instead of usize to avoid later conversions
-}
-impl<T: Numeric> VecInstances<T> {
-    fn new(coords: VecCoords<T>, sizes: VecSizes<T>, areas: Vec<T>, num_pins: Vec<T>) -> Self {
-        Self {
-            coords,
-            sizes,
-            areas,
-            num_pins,
-        }
-    }
-    pub fn len(&self) -> usize {
-        self.coords.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
+use crate::utils::{
+    get_lef_def_units, get_lef_scale, get_scale, parse_net, Coords, DieArea, InstanceType, Net,
+    Netlist, Numeric, OrientType, ParsedInstance, ParsedPin, PlacementType, Size, VecCoords,
+    VecInstances, VecSizes,
+};
 
 #[derive(Debug)]
 pub struct DB<T: Numeric> {
     pub diearea: DieArea<T>,
+    // orderder like: MOVABLE - FIXED - TERMINAL (FIXED)
     pub instances: VecInstances<T>,
     pub netlist: Netlist<T>,
 
     pub num_movable: usize,
+    pub num_fixed: usize,
+    // terminal are faked instance created for IO PINS (always fixed)
+    pub num_terminal: usize,
+    pub num_macro: usize,
     pub movable_area: T,
     pub fixed_area: T,
     pub cell_utilization: T,
 }
 impl<T: Numeric> DB<T> {
-    fn new(
-        diearea: DieArea<T>,
-        instances: VecInstances<T>,
-        netlist: Netlist<T>,
-        num_movable: usize,
-    ) -> Self {
+    fn new(diearea: DieArea<T>, instances: VecInstances<T>, netlist: Netlist<T>) -> Self {
         let mut movable_area = T::zero();
         let mut fixed_area = T::zero();
+
+        let mut num_movable = 0;
+        let mut num_fixed = 0;
+        let mut num_terminal = 0;
+        let mut num_macro = 0;
+
+        for i in 0..instances.len() {
+            if instances.is_movable(i) {
+                num_movable += 1;
+            } else {
+                num_fixed += 1;
+            }
+            if instances.is_macro(i) {
+                num_macro += 1;
+            }
+            if instances.is_terminal(i) {
+                num_terminal += 1;
+                // sanity check
+                assert!(!instances.is_movable(i));
+            }
+        }
+
+        assert_eq!(instances.len(), num_movable + num_fixed);
 
         for i in 0..num_movable {
             movable_area += instances.areas[i];
@@ -501,6 +67,9 @@ impl<T: Numeric> DB<T> {
             instances,
             netlist,
             num_movable,
+            num_fixed,
+            num_terminal,
+            num_macro,
             movable_area,
             fixed_area,
             cell_utilization,
@@ -538,9 +107,12 @@ impl<T: Numeric> fmt::Display for DB<T> {
             "  DIEAREA: {:?} - {:?}",
             self.diearea.size, self.diearea.offset
         )?;
-        writeln!(f, "  MOVABLE AREA: {:?}", self.movable_area)?;
-        writeln!(f, "  FIXED AREA: {:?}", self.fixed_area)?;
-        writeln!(f, "  NUM MOVABLE: {:?}", self.num_movable)?;
+        writeln!(f, "  MOVABLE AREA    : {:?}", self.movable_area)?;
+        writeln!(f, "  FIXED AREA      : {:?}", self.fixed_area)?;
+        writeln!(f, "  NUM MOVABLE     : {:?}", self.num_movable)?;
+        writeln!(f, "  NUM FIXED       : {:?}", self.num_fixed)?;
+        writeln!(f, "  NUM TERMINAL    : {:?}", self.num_terminal)?;
+        writeln!(f, "  NUM MACRO       : {:?}", self.num_macro)?;
         writeln!(f, "  CELL UTILIZATION: {:?}", self.cell_utilization)?;
 
         Ok(())
@@ -550,10 +122,11 @@ impl<T: Numeric> fmt::Display for DB<T> {
 fn read_instances<'a, T: Numeric>(
     lef: &'a LEF,
     def: &'a DEF,
-    diearea: &DieArea<T>,
-) -> Result<(Vec<ParsedInstance<'a, T>>, VecInstances<T>, usize)> {
-    let units = T::from(def.units.unwrap()).unwrap();
-    let scale = T::from(SCALE).unwrap();
+    _diearea: &DieArea<T>,
+) -> Result<(Vec<ParsedInstance<'a, T>>, VecInstances<T>)> {
+    let units = get_lef_def_units(lef, def)?;
+    let scale = get_scale(lef)?;
+    let lef_scale = get_lef_scale(lef)?;
 
     let name_to_lib: HashMap<&str, _> = lef
         .macros
@@ -563,7 +136,6 @@ fn read_instances<'a, T: Numeric>(
         .collect();
 
     let zero = T::zero();
-    let one = T::one();
 
     let mut parsed_instances = Vec::new();
     let mut fixed_parsed_instances = Vec::new();
@@ -572,6 +144,10 @@ fn read_instances<'a, T: Numeric>(
     let mut instances_y = Vec::new();
     let mut instances_w = Vec::new();
     let mut instances_h = Vec::new();
+    let mut instances_type = Vec::new();
+    // all to be MOVABLE
+    let mut instances_pl_type = Vec::new();
+    let mut instances_o_type = Vec::new();
     let mut instances_area = Vec::new();
     let mut instances_num_pins = Vec::new();
 
@@ -579,6 +155,10 @@ fn read_instances<'a, T: Numeric>(
     let mut fixed_instances_y = Vec::new();
     let mut fixed_instances_w = Vec::new();
     let mut fixed_instances_h = Vec::new();
+    let mut fixed_instances_type = Vec::new();
+    // all to be FIXED
+    let mut fixed_instances_pl_type = Vec::new();
+    let mut fixed_instances_o_type = Vec::new();
     let mut fixed_instances_area = Vec::new();
     let mut fixed_instances_num_pins = Vec::new();
 
@@ -587,7 +167,7 @@ fn read_instances<'a, T: Numeric>(
 
     let comps = match def.components.as_ref() {
         Some(c) => c,
-        None => return Ok((parsed_instances, VecInstances::default(), 0)),
+        None => return Ok((parsed_instances, VecInstances::default())),
     };
     for comp in comps {
         let name = comp.name.as_str();
@@ -595,27 +175,41 @@ fn read_instances<'a, T: Numeric>(
 
         let comp_lib = name_to_lib
             .get(model)
-            .unwrap_or_else(|| panic!("INSTANCE MODEL NOT FOUND IN LEF {model}"));
+            .ok_or_eyre(format!("INSTANCE MODEL NOT FOUND IN LEF {model}"))?;
 
-        let coords = match comp.opts.placement.as_ref() {
+        let size = comp_lib.opts.size.as_ref().ok_or_eyre("SIZE NOT FOUND")?;
+        let size_width = T::from(size.width).unwrap();
+        let size_height = T::from(size.height).unwrap();
+        let new_size = Size::new(
+            size_width * units * lef_scale,
+            size_height * units * lef_scale,
+        );
+
+        let (coords, orient_type) = match comp.opts.placement.as_ref() {
             Some(p) => {
-                let (offset_x, offset_y) = if comp_lib.is_in_site(diearea.site_name.clone()) {
-                    (diearea.offset.x, diearea.offset.y)
-                } else {
-                    (T::zero(), T::zero())
-                };
+                // let (diearea_offset_x, diearea_offset_y) =
+                //     if comp_lib.is_in_site(diearea.site_name.clone()) {
+                //         (diearea.offset.x, diearea.offset.y)
+                //     } else {
+                //         (T::zero(), T::zero())
+                //     };
 
                 let coords = Coords::new(
-                    ((T::from(p.1.x).unwrap() - offset_x) / units) * scale,
-                    ((T::from(p.1.y).unwrap() - offset_y) / units) * scale,
+                    // ((T::from(p.1.x).unwrap() - diearea_offset_x) * units) * scale,
+                    // ((T::from(p.1.y).unwrap() - diearea_offset_y) * units) * scale,
+                    ((T::from(p.1.x).unwrap()) * units) * scale,
+                    ((T::from(p.1.y).unwrap()) * units) * scale,
                 );
+
+                let orient = OrientType::from(&p.2);
 
                 assert!(
                     coords.x >= zero,
                     "negative x {:?} (originally {:?}) with offset {:?} for {}",
                     coords.x,
                     p.1.x,
-                    offset_x,
+                    // diearea_offset_x,
+                    0,
                     name
                 );
                 assert!(
@@ -623,13 +217,14 @@ fn read_instances<'a, T: Numeric>(
                     "negative y {:?} (originally {:?}) with offset {:?} for {}",
                     coords.y,
                     p.1.y,
-                    offset_y,
+                    // diearea_offset_y,
+                    0,
                     name
                 );
 
-                coords
+                (coords, orient)
             }
-            None => Coords::new(T::zero(), T::zero()),
+            None => (Coords::new(T::zero(), T::zero()), OrientType::default()),
         };
 
         let placement_type = if comp.is_fixed() {
@@ -644,24 +239,24 @@ fn read_instances<'a, T: Numeric>(
             InstanceType::STDCELL
         };
 
-        let size = comp_lib.opts.size.as_ref().expect("SIZE NOT FOUND");
-        let new_size = Size::new(
-            T::from(size.width).unwrap() * scale,
-            T::from(size.height).unwrap() * scale,
-        );
-
         let num_pins = T::from(comp_lib.opts.pins.as_ref().map_or(0, |pins| pins.len())).unwrap();
 
         let push_instance = |xs: &mut Vec<T>,
                              ys: &mut Vec<T>,
                              ws: &mut Vec<T>,
                              hs: &mut Vec<T>,
+                             types: &mut Vec<InstanceType>,
+                             pl_types: &mut Vec<PlacementType>,
+                             o_types: &mut Vec<OrientType>,
                              areas: &mut Vec<T>,
                              pins: &mut Vec<T>| {
             xs.push(coords.x);
             ys.push(coords.y);
             ws.push(new_size.width);
             hs.push(new_size.height);
+            types.push(instance_type.clone());
+            pl_types.push(placement_type.clone());
+            o_types.push(orient_type.clone());
             areas.push(new_size.width * new_size.height);
             pins.push(num_pins);
         };
@@ -673,6 +268,9 @@ fn read_instances<'a, T: Numeric>(
                     &mut fixed_instances_y,
                     &mut fixed_instances_w,
                     &mut fixed_instances_h,
+                    &mut fixed_instances_type,
+                    &mut fixed_instances_pl_type,
+                    &mut fixed_instances_o_type,
                     &mut fixed_instances_area,
                     &mut fixed_instances_num_pins,
                 );
@@ -683,6 +281,7 @@ fn read_instances<'a, T: Numeric>(
                     model,
                     instance_type,
                     placement_type,
+                    orient_type,
                     coords,
                     offset,
                     new_size,
@@ -694,6 +293,9 @@ fn read_instances<'a, T: Numeric>(
                     &mut instances_y,
                     &mut instances_w,
                     &mut instances_h,
+                    &mut instances_type,
+                    &mut instances_pl_type,
+                    &mut instances_o_type,
                     &mut instances_area,
                     &mut instances_num_pins,
                 );
@@ -704,6 +306,7 @@ fn read_instances<'a, T: Numeric>(
                     model,
                     instance_type,
                     placement_type,
+                    orient_type,
                     coords,
                     offset,
                     new_size,
@@ -714,63 +317,46 @@ fn read_instances<'a, T: Numeric>(
         }
     }
 
-    // IO pin instance
-    fixed_instances_x.push(zero);
-    fixed_instances_y.push(zero);
-    fixed_instances_w.push(zero);
-    fixed_instances_h.push(zero);
-    fixed_instances_area.push(zero);
-    fixed_instances_num_pins.push(one);
-
     instances_x.extend(fixed_instances_x);
     instances_y.extend(fixed_instances_y);
     instances_w.extend(fixed_instances_w);
     instances_h.extend(fixed_instances_h);
+    instances_type.extend(fixed_instances_type);
+    instances_pl_type.extend(fixed_instances_pl_type);
+    instances_o_type.extend(fixed_instances_o_type);
     instances_area.extend(fixed_instances_area);
     instances_num_pins.extend(fixed_instances_num_pins);
 
-    let num_movable = id;
-
+    // fixed instances are last ones
     for fixed in &mut fixed_parsed_instances {
         fixed.update_id(id);
         id += 1;
     }
-
-    fixed_parsed_instances.push(ParsedInstance::new(
-        id,
-        "IO",
-        "IO",
-        InstanceType::MACRO,
-        PlacementType::FIXED,
-        Coords::new(zero, zero),
-        Coords::new(zero, zero),
-        Size::new(zero, zero),
-    ));
 
     parsed_instances.extend(fixed_parsed_instances);
 
     let instances = VecInstances::new(
         VecCoords::new(instances_x, instances_y),
         VecSizes::new(instances_w, instances_h),
+        instances_type,
+        instances_pl_type,
+        instances_o_type,
         instances_area,
         instances_num_pins,
     );
 
     assert_eq!(parsed_instances.len(), instances.len());
 
-    Ok((parsed_instances, instances, num_movable))
+    Ok((parsed_instances, instances))
 }
 
-fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
-    let scale = T::from(SCALE).unwrap();
+fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF, full_diearea: bool) -> Result<DieArea<T>> {
+    let scale = get_scale(lef)?;
 
     // site
-    let site = lef
-        .sites
-        .as_ref()
-        .and_then(|sites| sites.iter().find(|s| s.is_core()).or_else(|| sites.first()));
+    let site = lef.get_site();
 
-    // offsets
+    // TODO: offsets
     let (site_offset_x, site_offset_y) = match site {
         None => (0.0, 0.0),
         Some(site) => def.rows.as_ref().map_or((0.0, 0.0), |rows| {
@@ -800,9 +386,7 @@ fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
         .as_ref()
         .ok_or_eyre("DIEAREA not found in DEF")?;
 
-    let units = def.units.ok_or_eyre("UNITS not found in DEF")?;
-
-    let units_t = T::from(units).unwrap();
+    let units = get_lef_def_units(lef, def)?;
 
     let (offset_x, offset_y, diearea_width, diearea_height) = diearea.get_rectangle()?;
 
@@ -810,34 +394,39 @@ fn read_diearea<T: Numeric>(lef: &LEF, def: &DEF) -> Result<DieArea<T>> {
     let die_offset_y = site_offset_y + offset_y;
     let site_name = site.map(|s| s.name.clone());
 
-    Ok(DieArea::new(
+    let mut diearea = DieArea::new(
         site_name,
         Size::new(
-            (T::from(diearea_width - site_offset_x * 2.).unwrap() / units_t) * scale,
-            (T::from(diearea_height - site_offset_y * 2.).unwrap() / units_t) * scale,
+            (T::from(diearea_width - site_offset_x * 2.).unwrap() * units) * scale,
+            (T::from(diearea_height - site_offset_y * 2.).unwrap() * units) * scale,
         ),
         Size::new(
-            (T::from(diearea_width).unwrap() / units_t) * scale,
-            (T::from(diearea_height).unwrap() / units_t) * scale,
+            (T::from(diearea_width).unwrap() * units) * scale,
+            (T::from(diearea_height).unwrap() * units) * scale,
         ),
         Coords::new(
             T::from(die_offset_x).unwrap(),
             T::from(die_offset_y).unwrap(),
         ),
-    ))
+    );
+
+    if full_diearea {
+        diearea.use_full_size();
+    }
+
+    Ok(diearea)
 }
 
+// in case of IO/PIN a new fake instance is created for each one of them
 fn read_netlist<'a, T: Numeric>(
     lef: &LEF,
     def: &DEF,
     parsed_instances: &Vec<ParsedInstance<'a, T>>,
-    instances: &VecInstances<T>,
+    instances: &mut VecInstances<T>,
 ) -> Result<Netlist<T>> {
-    let units = T::from(def.units.unwrap()).unwrap();
-    let scale = T::from(SCALE).unwrap();
-    let zero = T::zero();
-    // last one
-    let iopin_id = parsed_instances.len() - 1;
+    let units = get_lef_def_units(lef, def)?;
+    let scale = get_scale(lef)?;
+    let lef_scale = get_lef_scale(lef)?;
 
     let name_to_lib: HashMap<&str, _> = lef
         .macros
@@ -851,7 +440,7 @@ fn read_netlist<'a, T: Numeric>(
         .map(|macr| (macr.name, macr))
         .collect();
 
-    let name_to_iopin: HashMap<&str, _> = def
+    let name_to_defpin: HashMap<&str, &DEFPin> = def
         .pins
         .iter()
         .flatten()
@@ -866,80 +455,19 @@ fn read_netlist<'a, T: Numeric>(
 
     if let Some(ref def_nets) = def.nets {
         for net in def_nets {
-            let mut pins = vec![];
-
-            if let Some(ref conns) = net.opts.connections {
-                for conn in conns {
-                    let inst_name: &str = &conn.0;
-                    let pin_name: &str = &conn.1;
-                    // TODO: IO PIN
-                    let (cell_id, coords, size) = if inst_name == "PIN" {
-                        let lib = name_to_iopin
-                            .get(pin_name)
-                            .unwrap_or_else(|| panic!("IO PIN NOT FOUND IN DEF {}", pin_name));
-
-                        let (px, py) = if let Some(ref pl) = lib.opts.placement {
-                            (pl.location.x, pl.location.y)
-                        } else {
-                            // panic!("PLACEMENT NOT FOUND IN PIN {}", pin_name);
-                            // CLK in some cases might be be placed
-                            (0, 0)
-                        };
-
-                        let coords = Coords::new(
-                            (T::from(px).unwrap() / units) * scale,
-                            (T::from(py).unwrap() / units) * scale,
-                        );
-                        let size = Size::new(zero, zero);
-
-                        (iopin_id, coords, size)
-                    } else {
-                        let cell = inst_name_to_cell
-                            .get(inst_name)
-                            .unwrap_or_else(|| panic!("INSTANCE NOT FOUND IN DEF {}", inst_name));
-
-                        let model = cell.model;
-
-                        let lib = name_to_lib
-                            .get(model)
-                            .unwrap_or_else(|| panic!("INSTANCE MODEL NOT FOUND IN LEF {}", model));
-
-                        let lib_pin = lib.get_pin(pin_name).unwrap_or_else(|| {
-                            panic!("PIN {} NOT FOUND IN CELL {}", pin_name, model)
-                        });
-
-                        if let Some(ref lib_pin_ports) = lib_pin.opts.ports {
-                            // TODO: expand to more complex shapes
-                            let port = lib_pin_ports.first().ok_or(eyre!("not enough ports"))?;
-                            let rect = port.get_rect()?;
-                            let coords = Coords::new(
-                                (T::from(rect.0).unwrap() / units) * scale,
-                                (T::from(rect.1).unwrap() / units) * scale,
-                            );
-                            let size = Size::new(
-                                T::from(rect.2).unwrap() * scale,
-                                T::from(rect.3).unwrap() * scale,
-                            );
-
-                            (cell.id, coords, size)
-                        } else {
-                            panic!("PORTS NOT FOUND IN PIN {} OF CELL {}", pin_name, model);
-                        }
-                    };
-
-                    let pin = (cell_id, coords, size);
-                    pins.push(pin);
-                }
-
-                match pins.len() {
-                    0 | 1 => {}
-                    2 => temp_2nets.push(pins),
-                    3 => temp_3nets.push(pins),
-                    _ => temp_nnets.push(pins),
-                }
-            } else {
-                log::info!("NET IS EMPTY {}", net.name);
-            }
+            parse_net(
+                &name_to_defpin,
+                &name_to_lib,
+                &inst_name_to_cell,
+                &net,
+                units,
+                scale,
+                lef_scale,
+                instances,
+                &mut temp_2nets,
+                &mut temp_3nets,
+                &mut temp_nnets,
+            )?;
         }
     }
 
@@ -948,7 +476,7 @@ fn read_netlist<'a, T: Numeric>(
     let mut pins_x = vec![];
     let mut pins_y = vec![];
     let mut pin_2_macro = vec![];
-    let mut macro_2_pins = vec![vec![]; parsed_instances.len()];
+    let mut macro_2_pins = vec![vec![]; instances.len()];
     let mut nets = vec![];
 
     let n_2nets = temp_2nets.len();
@@ -966,6 +494,7 @@ fn read_netlist<'a, T: Numeric>(
                 let id = pin_id;
                 let macro_id = pin.0;
                 let coords = pin.1;
+
                 pins_x.push(coords.x);
                 pins_y.push(coords.y);
                 parsed_pins.push(ParsedPin::new(id, macro_id, coords, pin.2.clone()));
@@ -1005,22 +534,20 @@ fn read_netlist<'a, T: Numeric>(
 pub fn read_db<T: Numeric>(
     lef_path: &OsString,
     def_path: &OsString,
-    verbose: bool,
+    full_diearea: bool,
 ) -> Result<DB<T>> {
     let lef = read_lef(lef_path)?;
     let def = read_def(def_path)?;
 
-    let diearea = read_diearea(&lef, &def)?;
-    let (parsed_instances, instances, num_movable) = read_instances(&lef, &def, &diearea)?;
-    let netlist = read_netlist(&lef, &def, &parsed_instances, &instances)?;
+    let diearea = read_diearea(&lef, &def, full_diearea)?;
+    let (parsed_instances, mut instances) = read_instances(&lef, &def, &diearea)?;
+    let netlist = read_netlist(&lef, &def, &parsed_instances, &mut instances)?;
 
-    let db = DB::new(diearea, instances, netlist, num_movable);
+    let db = DB::new(diearea, instances, netlist);
 
-    if verbose {
-        log::info!("{}", lef);
-        log::info!("{}", def);
-        log::info!("{}", db);
-    }
+    log::info!("{}", lef);
+    log::info!("{}", def);
+    log::info!("{}", db);
 
     Ok(db)
 }

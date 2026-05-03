@@ -1,3 +1,5 @@
 mod db;
+mod utils;
 
-pub use db::{DB, DieArea, Numeric, VecCoords, VecInstances, VecSizes, read_db};
+pub use db::{read_db, DB};
+pub use utils::{DieArea, Net, Numeric, VecCoords, VecInstances, VecSizes};
